@@ -11,11 +11,11 @@ MODEL_SAVE_PATH = "spell_model.pth"
 BATCH_SIZE = 8 # Small batch size because dataset is very small
 EPOCHS = 100
 IMG_SIZE = 64
-NUM_CLASSES = 6
+NUM_CLASSES = 9
 
 # --- Model Definition ---
 class SpellCNN(nn.Module):
-    def __init__(self, num_classes=6):
+    def __init__(self, num_classes=9):
         super(SpellCNN, self).__init__()
         # Input: 1 channel (Grayscale) x 64 x 64
         self.features = nn.Sequential(

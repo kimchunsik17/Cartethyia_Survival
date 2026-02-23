@@ -3,3 +3,8 @@
 - Tool Calls: Installed torchvision. Trained PyTorch CNN on collected spell data and saved to spell_model.pth. Integrated mouse drawing trajectory capture, shape cropping, scaling, and PyTorch model inference into main.py game loop. Implemented Spellbook Queue UI and penalty for failed casts.
 - Tool Calls: Fixed TypeError in test_recognition.py by casting drawing rect width to int.
 - Tool Calls: Changed spell mechanics to support multi-stroke symbols. Left click now draws indefinitely andSPACEBAR runs the prediction and saves it in both main.py and test_recognition.py.
+- Tool Calls: Implemented Musical Mana System (악상). Quarter Note and Eighth Note projectile modifiers logic. Sharp/Flat combination synergy. Added Player Mana state text drawing logic.
+- Tool Calls: Implemented Quarter Rest (4분쉼표) and Half Rest (2분쉼표) as mana recovery spells. Updated PyTorch settings to 9 classes.
+- Tool Calls: Added logic for Bass Clef and Treble Clef stance synergizing with Rest recovery amounts and Note attack damage multipliers in main.py.
+- Tool Calls: Completed overhaul of the Right-Click execution logic. Spells are now processed sequentially with a 0.5s delay. Global modifiers (Sharp, Flat) apply to the whole score, Accent only applies to the NEXT note and grants AoE size increases without costing extra mana.
+- Tool Calls: Completed Score Execution mechanism (Notes & Rests). Fixed Accent AoE. Added new Rest spells and recorded data. Preparing to commit and push changes to Git.

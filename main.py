@@ -14,7 +14,7 @@ import torchvision.transforms as transforms
 pygame.init()
 
 # Constants
-WIDTH, HEIGHT = 1280, 720
+WIDTH, HEIGHT = 1600, 900
 FPS = 60
 MAP_WIDTH, MAP_HEIGHT = 4000, 4000
 
@@ -25,12 +25,15 @@ SPELL_LABELS = [
     "2_Sharp",
     "3_Flat",
     "4_QuarterNote",
-    "5_Accent"
+    "5_Accent",
+    "6_EighthNote",
+    "7_QuarterRest",
+    "8_HalfRest"
 ]
 
 # --- PyTorch Model Setup ---
 class SpellCNN(nn.Module):
-    def __init__(self, num_classes=6):
+    def __init__(self, num_classes=9):
         super(SpellCNN, self).__init__()
         self.features = nn.Sequential(
             nn.Conv2d(1, 16, kernel_size=3, padding=1),
@@ -58,7 +61,7 @@ class SpellCNN(nn.Module):
 
 # Init Model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-spell_model = SpellCNN(num_classes=6).to(device)
+spell_model = SpellCNN(num_classes=9).to(device)
 try:
     spell_model.load_state_dict(torch.load("spell_model.pth", map_location=device))
     spell_model.eval()
@@ -232,6 +235,43 @@ if not projectile_frames_impact:
     pygame.draw.circle(surf, (255, 0, 0), (15, 15), 15)
     projectile_frames_impact.append(surf)
 
+# Load Spell UI Icons
+SPELL_ICONS_DIR = os.path.join(ASSETS_DIR, "spell")
+spell_icons_queue = {} # ~30x30 for bottom right queue
+spell_icons_floating = {} # ~60x60 for floating feedback
+
+spell_filename_map = {
+    "TrebleClef": "TrebleClef.png",
+    "BassClef": "BassClef.png",
+    "Sharp": "Sharp.png",
+    "Flat": "Flat.png",
+    "QuarterNote": "QuarterNote.png",
+    "Accent": "accent.png",
+    "EighthNote": "EighthNote.png",
+    "QuarterRest": "QuarterRest.png",
+    "HalfRest": "HalfRest.png"
+}
+
+for label in SPELL_LABELS:
+    spell_name = label.split('_')[1]
+    filename = spell_filename_map.get(spell_name, "")
+    filepath = os.path.join(SPELL_ICONS_DIR, filename)
+    
+    img_queue = load_image(filepath) # default load
+    if getattr(img_queue, 'get_size', None):
+        if img_queue.get_size() != (32, 32): # Not the dummy pink square
+            spell_icons_queue[label] = pygame.transform.smoothscale(img_queue, (30, 30))
+            spell_icons_floating[label] = pygame.transform.smoothscale(img_queue, (80, 80))
+        else:
+            spell_icons_queue[label] = img_queue
+            spell_icons_floating[label] = pygame.transform.scale(img_queue, (80, 80))
+    else:
+        # fallback dummy
+        surf = pygame.Surface((30, 30))
+        surf.fill((255, 0, 255))
+        spell_icons_queue[label] = surf
+        spell_icons_floating[label] = pygame.transform.scale(surf, (80, 80))
+
 
 # --- Classes ---
 class Camera:
@@ -283,6 +323,14 @@ class Player(pygame.sprite.Sprite):
         self.level = 1
         self.exp = 0
         self.exp_to_next_level = 50
+        
+        # Mana (Inspiration / 악상)
+        self.max_mana = 100.0
+        self.mana = self.max_mana
+        self.mana_regen = 5.0 # per second
+        
+        # Stance (Clefs)
+        self.stance = "Treble" # Treble or Bass
         
         self.animation_timer = 0
         self.animation_speed = 0.1
@@ -354,6 +402,9 @@ class Player(pygame.sprite.Sprite):
             self.current_frame = (self.current_frame + 1) % len(self.frames)
             self.image = self.frames[self.current_frame]
 
+        # Regenerate Mana
+        self.mana = min(self.max_mana, self.mana + self.mana_regen * dt)
+
         # Skill timer
         if self.skill_active:
             self.skill_timer -= dt
@@ -392,6 +443,7 @@ class Projectile(pygame.sprite.Sprite):
         self.animation_timer = 0
         self.animation_speed = 0.08 # Slightly slower so we can see frames 0,1,2 spinning
         
+        self.impact_scale_mod = 1.0
         self.impact_played = False
 
     def trigger_impact(self):
@@ -402,8 +454,12 @@ class Projectile(pygame.sprite.Sprite):
             self.animation_timer = 0
             self.animation_speed = 0.05
             self.speed = 0 # stop moving
-            # Keep the rotation consistency
+            # Keep the rotation consistency, and apply impact_scale_mod
             self.base_image = self.frames[self.current_frame]
+            if self.impact_scale_mod != 1.0:
+                w, h = self.base_image.get_size()
+                self.base_image = pygame.transform.smoothscale(self.base_image, (int(w * self.impact_scale_mod), int(h * self.impact_scale_mod)))
+            
             self.image = pygame.transform.rotate(self.base_image, self.angle_deg)
             self.rect = self.image.get_rect(center=(round(self.pos.x), round(self.pos.y)))
 
@@ -434,6 +490,10 @@ class Projectile(pygame.sprite.Sprite):
                     self.kill() # Animation finished
                 else:
                     self.base_image = self.frames[self.current_frame]
+                    if self.impact_scale_mod != 1.0:
+                        w, h = self.base_image.get_size()
+                        self.base_image = pygame.transform.smoothscale(self.base_image, (int(w * self.impact_scale_mod), int(h * self.impact_scale_mod)))
+                    
                     self.image = pygame.transform.rotate(self.base_image, self.angle_deg)
                     self.rect = self.image.get_rect(center=(round(self.pos.x), round(self.pos.y)))
 
@@ -542,10 +602,19 @@ is_drawing = False
 drawing_points = []
 drawing_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
 
-# Floating text for spell feedback
-spell_feedback_msg = ""
-spell_feedback_color = WHITE
+# UI variables
+show_damage_numbers = []
 spell_feedback_timer = 0.0
+spell_feedback_label = ""
+spell_feedback_color = WHITE
+
+# Score Execution State Machine
+active_score = []
+score_execution_timer = 0.0
+SCORE_EXECUTION_DELAY = 0.5
+global_dmg_mult = 1.0
+global_count_mult = 1
+accent_next_note = False
 
 # --- Main Loop ---
 running = True
@@ -582,14 +651,14 @@ while running:
                         spell_name, prob = predict_spell(test_surf)
                         if spell_name and prob >= 0.50:
                             print(f"Spell Cast Success! {spell_name} (Prob: {prob:.2f})")
-                            spell_feedback_msg = f"기록됨: {spell_name.split('_')[1]}"
+                            spell_feedback_label = spell_name
                             spell_feedback_color = GREEN
                             spell_feedback_timer = 2.0
                             if len(spellbook_queue) < MAX_SPELL_QUEUE:
                                 spellbook_queue.append(spell_name)
                         else:
                             print(f"Spell Cast FAIL! Best match was {spell_name} but only (Prob: {prob:.2f})")
-                            spell_feedback_msg = "인식 실패! 데미지를 입습니다."
+                            spell_feedback_label = "FAIL"
                             spell_feedback_color = RED
                             spell_feedback_timer = 2.0
                             player.health -= 20 # Punishment damage
@@ -602,38 +671,24 @@ while running:
                     is_drawing = True
                     # Do not clear if we are starting a new stroke for the same spell
                     drawing_points.append(event.pos)
-                elif event.button == 3: # Right click - Fire spell
-                    if len(spellbook_queue) > 0:
-                        # Fire the oldest spell
-                        fired_spell = spellbook_queue.pop(0)
+                elif event.button == 3: # Right click - Execute Score
+                    if len(spellbook_queue) > 0 and len(active_score) == 0:
+                        active_score = spellbook_queue.copy()
+                        spellbook_queue.clear()
                         
-                        # Find nearest enemy
-                        nearest_enemy = None
-                        min_dist = float('inf')
-                        for enemy in enemies:
-                            dist = (enemy.pos - player.pos).length_squared()
-                            if dist < min_dist:
-                                min_dist = dist
-                                nearest_enemy = enemy
+                        # Pre-calculate Globals (Sharps and Flats)
+                        global_dmg_mult = 1.0
+                        global_count_mult = 1
+                        
+                        for sp_full in active_score:
+                            sp_name = sp_full.split('_')[1] if '_' in sp_full else sp_full
+                            if sp_name == "Sharp":
+                                global_dmg_mult *= 1.7
+                            elif sp_name == "Flat":
+                                global_count_mult *= 2
                                 
-                        if nearest_enemy:
-                            # Fire projectiles based on projectile count toward nearest enemy
-                            p_count = player.projectile_count
-                            spread = 0.2
-                            dx = nearest_enemy.pos.x - player.rect.centerx
-                            dy = nearest_enemy.pos.y - player.rect.centery
-                            base_angle = math.atan2(dy, dx)
-                            start_angle = base_angle - (spread * (p_count - 1) / 2)
-                            
-                            for i in range(p_count):
-                                angle = start_angle + (i * spread)
-                                tx = player.rect.centerx + math.cos(angle) * 100
-                                ty = player.rect.centery + math.sin(angle) * 100
-                                proj = Projectile(player.rect.centerx, player.rect.centery, tx, ty)
-                                proj.damage *= player.damage_multiplier
-                                # TODO: Can apply specific spell effects based on `fired_spell` here
-                                all_sprites.add(proj)
-                                projectiles.add(proj)
+                        score_execution_timer = 0.0
+                        accent_next_note = False
             elif event.type == pygame.MOUSEMOTION:
                 if is_drawing:
                     drawing_points.append(event.pos)
@@ -681,6 +736,132 @@ while running:
             # Difficulty ramp: Spawn rate caps at 0.1s
             spawn_rate = max(0.1, spawn_rate - 0.002)
 
+        # Process the Score (악보) sequential execution
+        if len(active_score) > 0:
+            score_execution_timer -= dt
+            while len(active_score) > 0 and score_execution_timer <= 0:
+                current_spell_full = active_score[0]
+                sp_name = current_spell_full.split('_')[1] if '_' in current_spell_full else current_spell_full
+                
+                # Check for instant spells
+                if sp_name in ["TrebleClef", "BassClef", "Sharp", "Flat", "Accent"]:
+                    active_score.pop(0)
+                    if sp_name == "TrebleClef":
+                        player.stance = "Treble"
+                        spell_feedback_label = "공격 모드 (Treble)"
+                        spell_feedback_color = (0, 255, 0)
+                        spell_feedback_timer = 2.0
+                    elif sp_name == "BassClef":
+                        player.stance = "Bass"
+                        spell_feedback_label = "서포트 모드 (Bass)"
+                        spell_feedback_color = (150, 150, 255)
+                        spell_feedback_timer = 2.0
+                    elif sp_name == "Sharp":
+                        spell_feedback_label = "다음 공격 강화!"
+                        spell_feedback_color = (255, 0, 0)
+                        spell_feedback_timer = 1.0
+                    elif sp_name == "Flat":
+                        spell_feedback_label = "투사체 2배!"
+                        spell_feedback_color = (0, 0, 255)
+                        spell_feedback_timer = 1.0
+                    elif sp_name == "Accent":
+                        accent_next_note = True
+                        spell_feedback_label = "다음 공격 확산(AoE)!"
+                        spell_feedback_color = (255, 200, 0)
+                        spell_feedback_timer = 1.0
+                else:
+                    # Sequential spells: Notes and Rests
+                    base_cost = 0.0
+                    if sp_name == "QuarterNote": base_cost = 30.0
+                    elif sp_name == "EighthNote": base_cost = 15.0
+                    
+                    if player.mana >= base_cost:
+                        player.mana -= base_cost
+                        active_score.pop(0)
+                        
+                        # Execute
+                        if sp_name == "QuarterRest":
+                            amt = 50.0 if player.stance == "Bass" else 30.0
+                            player.mana = min(player.max_mana, player.mana + amt)
+                            spell_feedback_label = f"악상 회복 (+{int(amt)})"
+                            spell_feedback_color = (100, 200, 255)
+                            spell_feedback_timer = 2.0
+                        elif sp_name == "HalfRest":
+                            amt = 40.0 if player.stance == "Bass" else 20.0
+                            player.health = min(player.max_health, player.health + amt)
+                            spell_feedback_label = f"체력 회복 (+{int(amt)})"
+                            spell_feedback_color = (100, 255, 100)
+                            spell_feedback_timer = 2.0
+                        elif sp_name in ["QuarterNote", "EighthNote"]:
+                            shots_to_fire = 1
+                            proj_dmg_mult = 1.0
+                            proj_scale_mult = 1.0
+                            is_aoe = False
+                            
+                            if sp_name == "QuarterNote":
+                                shots_to_fire = 1
+                                proj_dmg_mult = 1.5
+                                proj_scale_mult = 1.5
+                            elif sp_name == "EighthNote":
+                                shots_to_fire = 2
+                                proj_dmg_mult = 0.5
+                                proj_scale_mult = 0.7
+                                
+                            if player.stance == "Bass":
+                                proj_dmg_mult *= 0.6
+                                
+                            if accent_next_note:
+                                is_aoe = True
+                                proj_scale_mult *= 2.0
+                                accent_next_note = False
+                                
+                            # Target selection logic
+                            nearest_enemy = None
+                            min_dist = float('inf')
+                            for enemy in enemies:
+                                dist = (enemy.pos - player.pos).length_squared()
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    nearest_enemy = enemy
+                                    
+                            if nearest_enemy:
+                                p_count = player.projectile_count * shots_to_fire * global_count_mult
+                                spread = 0.2
+                                dx = nearest_enemy.pos.x - player.rect.centerx
+                                dy = nearest_enemy.pos.y - player.rect.centery
+                                base_angle = math.atan2(dy, dx)
+                                start_angle = base_angle - (spread * (p_count - 1) / 2)
+                                
+                                for i in range(p_count):
+                                    angle = start_angle + (i * spread)
+                                    tx = player.rect.centerx + math.cos(angle) * 100
+                                    ty = player.rect.centery + math.sin(angle) * 100
+                                    proj = Projectile(player.rect.centerx, player.rect.centery, tx, ty)
+                                    
+                                    proj.damage = proj.damage * player.damage_multiplier * global_dmg_mult * proj_dmg_mult
+                                    proj.is_aoe = is_aoe
+                                    
+                                    if proj_scale_mult != 1.0:
+                                        w, h = proj.base_image.get_size()
+                                        proj.base_image = pygame.transform.smoothscale(proj.base_image, (int(w * proj_scale_mult), int(h * proj_scale_mult)))
+                                        proj.image = pygame.transform.rotate(proj.base_image, proj.angle_deg)
+                                        proj.rect = proj.image.get_rect(center=(round(proj.pos.x), round(proj.pos.y)))
+                                        proj.impact_scale_mod = proj_scale_mult
+                                        
+                                    all_sprites.add(proj)
+                                    projectiles.add(proj)
+                        
+                        # Set delay for the NEXT iteration since we processed a Note/Rest
+                        score_execution_timer = SCORE_EXECUTION_DELAY
+                    else:
+                        # Insufficient Mana aborts the rest of the score
+                        spell_feedback_label = "실패 / 악상 부족!"
+                        spell_feedback_color = RED
+                        spell_feedback_timer = 2.0
+                        active_score.clear()
+                        accent_next_note = False
+                        break
+
         # Updates
         player.update(dt)
         projectiles.update(dt)
@@ -700,19 +881,25 @@ while running:
             for p in projs:
                 if p.state == "flying":
                     enemy.health -= p.damage
+                    
+                    # Process Splash AoE Damage if projectile has it
+                    if getattr(p, 'is_aoe', False):
+                        for other_enemy in enemies:
+                            if other_enemy != enemy and (other_enemy.pos - p.pos).length_squared() <= 150**2:
+                                other_enemy.health -= p.damage
+                                
                     p.trigger_impact()
                     
-                    if enemy.health <= 0:
-                        # Enemy Dies
-                        enemy.kill()
-                        score += 10
-                        # Gain EXP based on enemy level
-                        exp_amount = 10 + (enemy.level * 5)
-                        leveled_up = player.gain_exp(exp_amount)
-                        if leveled_up:
-                            current_state = STATE_LEVEL_UP
-                            create_upgrade_overlay()
-                        break
+        # Check deaths separately because of AoE processing
+        for enemy in list(enemies):
+            if enemy.health <= 0:
+                enemy.kill()
+                score += 10
+                exp_amount = 10 + (enemy.level * 5)
+                leveled_up = player.gain_exp(exp_amount)
+                if leveled_up:
+                    current_state = STATE_LEVEL_UP
+                    create_upgrade_overlay()
 
         # Update Camera
         camera.update(player)
@@ -763,21 +950,49 @@ while running:
         exp_ratio = max(0, player.exp / player.exp_to_next_level)
         pygame.draw.rect(screen, (0, 150, 255), (20, 60, 200 * exp_ratio, 10))
         
-        # Spellbook UI
-        queue_start_x = WIDTH - 250
+        # Mana (악상) bar
+        pygame.draw.rect(screen, BLACK, (18, 88, 204, 14))
+        pygame.draw.rect(screen, (50, 50, 50), (20, 90, 200, 10))
+        mana_ratio = max(0, player.mana / player.max_mana)
+        pygame.draw.rect(screen, (150, 0, 255), (20, 90, 200 * mana_ratio, 10))
+        
+        # Spellboard UI (Queue or Active Score)
+        queue_start_x = WIDTH - 290
         queue_start_y = HEIGHT - 80
-        pygame.draw.rect(screen, (30, 30, 30), (queue_start_x, queue_start_y, 230, 60))
-        pygame.draw.rect(screen, WHITE, (queue_start_x, queue_start_y, 230, 60), 2)
+        pygame.draw.rect(screen, (30, 30, 30), (queue_start_x, queue_start_y, 270, 60))
+        
+        # Decide which queue to display (Active Execution vs Preparation)
+        display_queue = active_score if len(active_score) > 0 else spellbook_queue
+        border_color = (255, 200, 0) if len(active_score) > 0 else WHITE
+        pygame.draw.rect(screen, border_color, (queue_start_x, queue_start_y, 270, 60), 2)
+        
         try:
-            spell_title = ui_font.render("Spell Queue:", True, WHITE)
+            state_str = "실행 중" if len(active_score) > 0 else "대기열"
+            spell_title = ui_font.render(f"Score - {state_str} ({player.stance}):", True, border_color)
             screen.blit(spell_title, (queue_start_x + 10, queue_start_y - 25))
             
             # Draw individual spell icons / text
-            for idx, sp in enumerate(spellbook_queue):
-                sp_name = sp.split('_')[1] if '_' in sp else sp
-                badge = ui_font.render(sp_name[:3], True, BLACK) # abbreviated
-                pygame.draw.circle(screen, (100, 255, 100), (queue_start_x + 30 + (idx*40), queue_start_y + 30), 18)
-                screen.blit(badge, (queue_start_x + 18 + (idx*40), queue_start_y + 20))
+            for idx, sp in enumerate(display_queue):
+                center_x = queue_start_x + 30 + (idx*40)
+                center_y = queue_start_y + 30
+                
+                # Active note highlights if executing
+                if len(active_score) > 0 and idx == 0:
+                    pygame.draw.circle(screen, (100, 100, 50), (center_x, center_y), 20)
+                    pygame.draw.circle(screen, (255, 255, 100), (center_x, center_y), 20, 3)
+                else:
+                    pygame.draw.circle(screen, (50, 50, 50), (center_x, center_y), 18)
+                    pygame.draw.circle(screen, (100, 255, 100), (center_x, center_y), 18, 2)
+                
+                # Draw the spell image
+                if sp in spell_icons_queue:
+                    icon = spell_icons_queue[sp]
+                    icon_rect = icon.get_rect(center=(center_x, center_y))
+                    screen.blit(icon, icon_rect)
+                else:
+                    sp_name = sp.split('_')[1] if '_' in sp else sp
+                    badge = ui_font.render(sp_name[:2], True, WHITE)
+                    screen.blit(badge, (center_x - badge.get_width()//2, center_y - badge.get_height()//2))
                 
         except:
             pass
@@ -786,15 +1001,65 @@ while running:
             level_text = font.render(f"Lv: {player.level}", True, WHITE)
             screen.blit(level_text, (230, 15))
             score_text = font.render(f"Score: {score}", True, WHITE)
-            screen.blit(score_text, (20, 80))
+            screen.blit(score_text, (20, 120))
+            
+            # --- Draw Spell Guide ---
+            guide_y = 160
+            guide_x = 20
+            guide_title = font.render("- 악상 기호 가이드 -", True, (200, 200, 200))
+            screen.blit(guide_title, (guide_x, guide_y))
+            guide_y += 35
+            
+            guide_items = [
+                ("0_TrebleClef", "높은음: 공격 모드 (기본)"),
+                ("1_BassClef", "낮은음: 서포트 모드 (회복↑, 딜↓)"),
+                ("2_Sharp", "샵(#): [전체] 데미지 1.7배"),
+                ("3_Flat", "플랫(b): [전체] 탄 개수 2배"),
+                ("5_Accent", "악센트(>): [다음 공격] 확산(AoE) 및 크기 증가"),
+                ("4_QuarterNote", "4분음표: 강한 공격 1발 (악상 30)"),
+                ("6_EighthNote", "8분음표: 약한 공격 2발 (악상 15)"),
+                ("7_QuarterRest", "4분쉼표: 악상 회복 (기본30 / 서포트50)"),
+                ("8_HalfRest", "2분쉼표: 체력 회복 (기본20 / 서포트40)")
+            ]
+            
+            for g_label, g_desc in guide_items:
+                if g_label in spell_icons_queue:
+                    icon = spell_icons_queue[g_label]
+                    screen.blit(icon, (guide_x, guide_y - 5))
+                desc_surf = ui_font.render(g_desc, True, WHITE)
+                screen.blit(desc_surf, (guide_x + 40, guide_y))
+                guide_y += 40
+            # -------------------------
+            
             info_text = font.render("좌클릭 길게: 그리기 | 스페이스: 저장 | 우클릭: 사용 | LSHIFT: 스킬", True, WHITE)
             screen.blit(info_text, (WIDTH // 2 - info_text.get_width() // 2, 20))
             
-            # Spell Feedback Floating text
+            # Spell Feedback Floating UI
             if spell_feedback_timer > 0:
-                feedback_surf = font.render(spell_feedback_msg, True, spell_feedback_color)
-                # Draw above player center
-                screen.blit(feedback_surf, (WIDTH // 2 - feedback_surf.get_width() // 2, HEIGHT // 2 - 100))
+                floating_y = HEIGHT // 2 - 120
+                floating_x = WIDTH // 2
+                
+                if spell_feedback_label == "FAIL":
+                    feedback_surf = font.render("실패 / 악상 부족!", True, spell_feedback_color)
+                    screen.blit(feedback_surf, (floating_x - feedback_surf.get_width() // 2, floating_y))
+                # Text-based alerts without images (e.g. Clef changes, Mana recovery)
+                elif "모드" in spell_feedback_label or "회복" in spell_feedback_label:
+                    feedback_surf = font.render(spell_feedback_label, True, spell_feedback_color)
+                    screen.blit(feedback_surf, (floating_x - feedback_surf.get_width() // 2, floating_y))
+                else:
+                    # Draw a nice backing circle
+                    pygame.draw.circle(screen, (30, 30, 30), (floating_x, floating_y), 45)
+                    pygame.draw.circle(screen, spell_feedback_color, (floating_x, floating_y), 45, 3)
+                    
+                    if spell_feedback_label in spell_icons_floating:
+                        icon = spell_icons_floating[spell_feedback_label]
+                        icon_rect = icon.get_rect(center=(floating_x, floating_y))
+                        screen.blit(icon, icon_rect)
+                        
+                    # Add small text underneath
+                    saved_text = ui_font.render("저장됨!", True, GREEN)
+                    screen.blit(saved_text, (floating_x - saved_text.get_width() // 2, floating_y + 50))
+
         except:
             pass # Handle potential font issues silently
 

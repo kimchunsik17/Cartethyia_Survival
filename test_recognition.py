@@ -19,8 +19,23 @@ SPELL_LABELS = [
     "2_Sharp",
     "3_Flat",
     "4_QuarterNote",
-    "5_Accent"
+    "5_Accent",
+    "6_EighthNote",
+    "7_QuarterRest",
+    "8_HalfRest"
 ]
+
+spell_filename_map = {
+    "TrebleClef": "TrebleClef.png",
+    "BassClef": "BassClef.png",
+    "Sharp": "Sharp.png",
+    "Flat": "Flat.png",
+    "QuarterNote": "QuarterNote.png",
+    "Accent": "accent.png",
+    "EighthNote": "EighthNote.png",
+    "QuarterRest": "QuarterRest.png",
+    "HalfRest": "HalfRest.png"
+}
 
 # --- PyTorch Model Setup ---
 class SpellCNN(nn.Module):
@@ -115,6 +130,21 @@ try:
 except Exception as e:
     print(f"Error loading model: {e}")
 
+# Load Spell UI Icons
+SPELL_ICONS_DIR = os.path.join(os.path.dirname(__file__), "assets", "spell")
+spell_icons = {} 
+for label in SPELL_LABELS:
+    spell_name = label.split('_')[1]
+    filename = spell_filename_map.get(spell_name, "")
+    filepath = os.path.join(SPELL_ICONS_DIR, filename)
+    try:
+        img = pygame.image.load(filepath).convert_alpha()
+        spell_icons[label] = pygame.transform.smoothscale(img, (30, 30))
+    except:
+        surf = pygame.Surface((30, 30))
+        surf.fill((255, 0, 255))
+        spell_icons[label] = surf
+
 canvas = pygame.Surface((WINDOW_SIZE, WINDOW_SIZE))
 canvas.fill(BG_COLOR)
 
@@ -193,13 +223,17 @@ while running:
                 if i == 0 and prob < 50:
                     color = (255, 100, 100) # Failed to recognize
                 
+                # Draw Icon
+                if SPELL_LABELS[idx] in spell_icons:
+                    screen.blit(spell_icons[SPELL_LABELS[idx]], (ui_x, y_offset - 5))
+                
                 text = font.render(f"{i+1}. {label_name}: {prob:.1f}%", True, color)
-                screen.blit(text, (ui_x, y_offset))
+                screen.blit(text, (ui_x + 35, y_offset))
                 
                 # Draw bar
                 bar_width = int(max(0, 200 * current_probs[idx]))
-                pygame.draw.rect(screen, (50, 50, 50), (ui_x, y_offset + 30, 200, 10))
-                pygame.draw.rect(screen, color, (ui_x, y_offset + 30, bar_width, 10))
+                pygame.draw.rect(screen, (50, 50, 50), (ui_x + 35, y_offset + 30, 200, 10))
+                pygame.draw.rect(screen, color, (ui_x + 35, y_offset + 30, bar_width, 10))
                 
                 y_offset += 60
 

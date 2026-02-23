@@ -19,7 +19,10 @@ LABELS = [
     "2_Sharp",        # 샵 (#)
     "3_Flat",         # 플랫 (b)
     "4_QuarterNote",  # 4분음표
-    "5_Accent"        # 악센트 (>)
+    "5_Accent",       # 악센트 (>)
+    "6_EighthNote",   # 8분음표
+    "7_QuarterRest",  # 4분쉼표
+    "8_HalfRest"      # 2분쉼표
 ]
 
 current_label_idx = 0
