@@ -1,2 +1,5 @@
 ﻿- Tool Calls: adjusted player size to 75% (1.5x of previous) and enemy base size to 0.7. Verified via running script.
 - User Request: 플로로 파일 안에 플로로_공격_이펙트.png 파일을 추가했는데 이게 여러 사진들이 융합된 형태야 이걸 공격 투사체에 애니메이션으로 적용해줄래
+- Tool Calls: Installed torchvision. Trained PyTorch CNN on collected spell data and saved to spell_model.pth. Integrated mouse drawing trajectory capture, shape cropping, scaling, and PyTorch model inference into main.py game loop. Implemented Spellbook Queue UI and penalty for failed casts.
+- Tool Calls: Fixed TypeError in test_recognition.py by casting drawing rect width to int.
+- Tool Calls: Changed spell mechanics to support multi-stroke symbols. Left click now draws indefinitely andSPACEBAR runs the prediction and saves it in both main.py and test_recognition.py.

@@ -3,7 +3,12 @@ import sys
 import os
 import random
 import math
+import numpy as np
 from PIL import Image
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms as transforms
 
 # Initialize Pygame
 pygame.init()
@@ -12,6 +17,102 @@ pygame.init()
 WIDTH, HEIGHT = 1280, 720
 FPS = 60
 MAP_WIDTH, MAP_HEIGHT = 4000, 4000
+
+# SPELL CLASSES
+SPELL_LABELS = [
+    "0_TrebleClef",
+    "1_BassClef",
+    "2_Sharp",
+    "3_Flat",
+    "4_QuarterNote",
+    "5_Accent"
+]
+
+# --- PyTorch Model Setup ---
+class SpellCNN(nn.Module):
+    def __init__(self, num_classes=6):
+        super(SpellCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(2, 2)
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * 8 * 8, 128),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+# Init Model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+spell_model = SpellCNN(num_classes=6).to(device)
+try:
+    spell_model.load_state_dict(torch.load("spell_model.pth", map_location=device))
+    spell_model.eval()
+    print("Successfully loaded spell_model.pth")
+except Exception as e:
+    print(f"Warning: Could not load spell_model.pth: {e}")
+
+# Transform for incoming Pygame surface
+spell_transform = transforms.Compose([
+    transforms.ToTensor()
+])
+
+def predict_spell(surface):
+    # Get surface pixels
+    arr = pygame.surfarray.pixels_red(surface)
+    coords = np.argwhere(arr > 0)
+    if coords.size == 0:
+        return None, 0.0
+        
+    x_min, y_min = coords.min(axis=0)
+    x_max, y_max = coords.max(axis=0)
+    
+    padding = 20
+    x_min = max(0, x_min - padding)
+    y_min = max(0, y_min - padding)
+    x_max = min(surface.get_width(), x_max + padding)
+    y_max = min(surface.get_height(), y_max + padding)
+    
+    rect = pygame.Rect(x_min, y_min, x_max - x_min, y_max - y_min)
+    cropped = surface.subsurface(rect).copy()
+    
+    max_side = max(rect.width, rect.height)
+    square_surf = pygame.Surface((max_side, max_side))
+    square_surf.fill((0, 0, 0))
+    
+    offset_x = (max_side - rect.width) // 2
+    offset_y = (max_side - rect.height) // 2
+    square_surf.blit(cropped, (offset_x, offset_y))
+    
+    final_surf = pygame.transform.smoothscale(square_surf, (64, 64))
+    
+    # Convert to grayscale values [0.0, 1.0]
+    img_array = pygame.surfarray.pixels_red(final_surf).astype(np.float32) / 255.0
+    img_array = img_array.T # Pygame uses (x,y), transform to (y,x)
+    
+    # Needs channel dim: (1, 64, 64) -> add batch dim (1, 1, 64, 64)
+    tensor = torch.from_numpy(img_array).unsqueeze(0).unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        outputs = spell_model(tensor)
+        probs = F.softmax(outputs, dim=1)
+        max_prob, predicted = torch.max(probs, 1)
+        
+    return SPELL_LABELS[predicted.item()], max_prob.item()
 
 # Colors
 WHITE = (255, 255, 255)
@@ -434,6 +535,18 @@ def create_upgrade_overlay():
         rect = pygame.Rect(start_x + i * (card_width + spacing), start_y, card_width, card_height)
         upgrade_rects.append(rect)
 
+spellbook_queue = []
+MAX_SPELL_QUEUE = 5
+
+is_drawing = False
+drawing_points = []
+drawing_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+
+# Floating text for spell feedback
+spell_feedback_msg = ""
+spell_feedback_color = WHITE
+spell_feedback_timer = 0.0
+
 # --- Main Loop ---
 running = True
 while running:
@@ -445,41 +558,89 @@ while running:
         game_time += dt
         # Time multiplier increases by 0.1 every 10 seconds
         time_multiplier = math.floor(game_time / 10.0) * 0.1
-        
+        if spell_feedback_timer > 0:
+            spell_feedback_timer -= dt
+
         # Event Handling
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
+                if event.key == pygame.K_LSHIFT:
                     player.activate_skill()
+                elif event.key == pygame.K_SPACE:
+                    valid_points = [p for p in drawing_points if p is not None]
+                    if len(valid_points) > 5: # Valid draw
+                        # Render white lines on black surface for model prediction
+                        test_surf = pygame.Surface((WIDTH, HEIGHT))
+                        test_surf.fill((0, 0, 0))
+                        for i in range(1, len(drawing_points)):
+                            if drawing_points[i-1] is not None and drawing_points[i] is not None:
+                                pygame.draw.line(test_surf, (255, 255, 255), drawing_points[i-1], drawing_points[i], 15)
+                                pygame.draw.circle(test_surf, (255, 255, 255), drawing_points[i], 7)
+                                
+                        spell_name, prob = predict_spell(test_surf)
+                        if spell_name and prob >= 0.50:
+                            print(f"Spell Cast Success! {spell_name} (Prob: {prob:.2f})")
+                            spell_feedback_msg = f"기록됨: {spell_name.split('_')[1]}"
+                            spell_feedback_color = GREEN
+                            spell_feedback_timer = 2.0
+                            if len(spellbook_queue) < MAX_SPELL_QUEUE:
+                                spellbook_queue.append(spell_name)
+                        else:
+                            print(f"Spell Cast FAIL! Best match was {spell_name} but only (Prob: {prob:.2f})")
+                            spell_feedback_msg = "인식 실패! 데미지를 입습니다."
+                            spell_feedback_color = RED
+                            spell_feedback_timer = 2.0
+                            player.health -= 20 # Punishment damage
+                            if player.health <= 0:
+                                current_state = STATE_GAME_OVER
+                    
+                    drawing_points.clear()
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1: # Left click
-                    mouse_x, mouse_y = pygame.mouse.get_pos()
-                    world_x = mouse_x - camera.camera.x
-                    world_y = mouse_y - camera.camera.y
-                    
-                    # Calculate base direction angle
-                    dx = world_x - player.rect.centerx
-                    dy = world_y - player.rect.centery
-                    base_angle = math.atan2(dy, dx)
-                    
-                    # Fire projectiles based on projectile count
-                    p_count = player.projectile_count
-                    spread = 0.2 # radians between projectiles
-                    start_angle = base_angle - (spread * (p_count - 1) / 2)
-                    
-                    for i in range(p_count):
-                        angle = start_angle + (i * spread)
-                        tx = player.rect.centerx + math.cos(angle) * 100
-                        ty = player.rect.centery + math.sin(angle) * 100
+                if event.button == 1: # Left click - start drawing
+                    is_drawing = True
+                    # Do not clear if we are starting a new stroke for the same spell
+                    drawing_points.append(event.pos)
+                elif event.button == 3: # Right click - Fire spell
+                    if len(spellbook_queue) > 0:
+                        # Fire the oldest spell
+                        fired_spell = spellbook_queue.pop(0)
                         
-                        proj = Projectile(player.rect.centerx, player.rect.centery, tx, ty)
-                        # Apply damage multiplier
-                        proj.damage *= player.damage_multiplier
-                        
-                        all_sprites.add(proj)
-                        projectiles.add(proj)
+                        # Find nearest enemy
+                        nearest_enemy = None
+                        min_dist = float('inf')
+                        for enemy in enemies:
+                            dist = (enemy.pos - player.pos).length_squared()
+                            if dist < min_dist:
+                                min_dist = dist
+                                nearest_enemy = enemy
+                                
+                        if nearest_enemy:
+                            # Fire projectiles based on projectile count toward nearest enemy
+                            p_count = player.projectile_count
+                            spread = 0.2
+                            dx = nearest_enemy.pos.x - player.rect.centerx
+                            dy = nearest_enemy.pos.y - player.rect.centery
+                            base_angle = math.atan2(dy, dx)
+                            start_angle = base_angle - (spread * (p_count - 1) / 2)
+                            
+                            for i in range(p_count):
+                                angle = start_angle + (i * spread)
+                                tx = player.rect.centerx + math.cos(angle) * 100
+                                ty = player.rect.centery + math.sin(angle) * 100
+                                proj = Projectile(player.rect.centerx, player.rect.centery, tx, ty)
+                                proj.damage *= player.damage_multiplier
+                                # TODO: Can apply specific spell effects based on `fired_spell` here
+                                all_sprites.add(proj)
+                                projectiles.add(proj)
+            elif event.type == pygame.MOUSEMOTION:
+                if is_drawing:
+                    drawing_points.append(event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1 and is_drawing:
+                    is_drawing = False
+                    drawing_points.append(None) # Mark the end of this stroke
 
         # Simple enemy spawning just outside camera view
         spawn_timer += dt
@@ -578,11 +739,15 @@ while running:
     # Draw Background
     screen.fill(BG_COLOR)
     
-    # Draw simple tiling grid on floor if playing (can leave as is)
-
     # Draw Sprites (Sorted by Y coordinates to give false depth)
     for sprite in sorted(all_sprites, key=lambda s: s.rect.bottom):
         screen.blit(sprite.image, camera.apply(sprite))
+
+    # Draw the current drawing line
+    if len(drawing_points) > 1:
+        for i in range(1, len(drawing_points)):
+            if drawing_points[i-1] is not None and drawing_points[i] is not None:
+                pygame.draw.line(screen, (0, 255, 255), drawing_points[i-1], drawing_points[i], 5)
 
     # Draw UI
     if current_state in (STATE_PLAYING, STATE_LEVEL_UP):
@@ -598,13 +763,38 @@ while running:
         exp_ratio = max(0, player.exp / player.exp_to_next_level)
         pygame.draw.rect(screen, (0, 150, 255), (20, 60, 200 * exp_ratio, 10))
         
+        # Spellbook UI
+        queue_start_x = WIDTH - 250
+        queue_start_y = HEIGHT - 80
+        pygame.draw.rect(screen, (30, 30, 30), (queue_start_x, queue_start_y, 230, 60))
+        pygame.draw.rect(screen, WHITE, (queue_start_x, queue_start_y, 230, 60), 2)
+        try:
+            spell_title = ui_font.render("Spell Queue:", True, WHITE)
+            screen.blit(spell_title, (queue_start_x + 10, queue_start_y - 25))
+            
+            # Draw individual spell icons / text
+            for idx, sp in enumerate(spellbook_queue):
+                sp_name = sp.split('_')[1] if '_' in sp else sp
+                badge = ui_font.render(sp_name[:3], True, BLACK) # abbreviated
+                pygame.draw.circle(screen, (100, 255, 100), (queue_start_x + 30 + (idx*40), queue_start_y + 30), 18)
+                screen.blit(badge, (queue_start_x + 18 + (idx*40), queue_start_y + 20))
+                
+        except:
+            pass
+        
         try:
             level_text = font.render(f"Lv: {player.level}", True, WHITE)
             screen.blit(level_text, (230, 15))
             score_text = font.render(f"Score: {score}", True, WHITE)
             screen.blit(score_text, (20, 80))
-            info_text = font.render("WASD: Move | Mouse Click: Attack | SPACE: Use Skill", True, WHITE)
+            info_text = font.render("좌클릭 길게: 그리기 | 스페이스: 저장 | 우클릭: 사용 | LSHIFT: 스킬", True, WHITE)
             screen.blit(info_text, (WIDTH // 2 - info_text.get_width() // 2, 20))
+            
+            # Spell Feedback Floating text
+            if spell_feedback_timer > 0:
+                feedback_surf = font.render(spell_feedback_msg, True, spell_feedback_color)
+                # Draw above player center
+                screen.blit(feedback_surf, (WIDTH // 2 - feedback_surf.get_width() // 2, HEIGHT // 2 - 100))
         except:
             pass # Handle potential font issues silently
 
