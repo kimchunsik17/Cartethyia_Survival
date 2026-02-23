@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+import json # Added import json
 
 # Initialize Pygame
 pygame.init()
@@ -59,11 +60,21 @@ class SpellCNN(nn.Module):
         x = self.classifier(x)
         return x
 
+# Resource Path Helper for PyInstaller
+def get_resource_path(relative_path):
+    if getattr(sys, 'frozen', False):
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(__file__)
+    return os.path.join(base_path, relative_path)
+
 # Init Model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 spell_model = SpellCNN(num_classes=9).to(device)
 try:
-    spell_model.load_state_dict(torch.load("spell_model.pth", map_location=device))
+    model_path = get_resource_path("spell_model.pth")
+    spell_model.load_state_dict(torch.load(model_path, map_location=device))
     spell_model.eval()
     print("Successfully loaded spell_model.pth")
 except Exception as e:
@@ -129,8 +140,33 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("띳띠 서바이벌")
 clock = pygame.time.Clock()
 
+# --- Configuration Loading ---
+PLAYER_CONFIG = {}
+ENEMY_CONFIG = {}
+
+try:
+    player_conf_path = get_resource_path("player_config.json")
+    with open(player_conf_path, "r", encoding="utf-8") as f:
+        PLAYER_CONFIG = json.load(f)
+except Exception as e:
+    print(f"Warning: Could not load player_config.json, using fallback stats. {e}")
+    PLAYER_CONFIG = {
+        "max_health": 100, "base_speed": 400, "projectile_count": 1,
+        "max_mana": 100.0, "mana_regen": 5.0, "damage_multiplier": 1.0
+    }
+
+try:
+    enemy_conf_path = get_resource_path("enemy_config.json")
+    with open(enemy_conf_path, "r", encoding="utf-8") as f:
+        ENEMY_CONFIG = json.load(f)
+except Exception as e:
+    print(f"Warning: Could not load enemy_config.json, using fallback stats. {e}")
+    ENEMY_CONFIG = {
+        "1": {"health": 30, "speed": 100, "damage": 5, "scale": 0.5}
+    }
+
 # Asset Paths
-ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+ASSETS_DIR = get_resource_path("assets")
 PLAYER_DIR = os.path.join(ASSETS_DIR, "플로로")
 ENEMY_DIR = os.path.join(ASSETS_DIR, "띳띠")
 
@@ -307,16 +343,16 @@ class Player(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(center=(x, y))
         self.pos = pygame.math.Vector2(x, y)
         
-        # Base Stats
-        self.base_speed = 400
+        # Base Stats from Config
+        self.base_speed = PLAYER_CONFIG.get("base_speed", 400)
         self.speed = self.base_speed
-        self.max_health = 100
+        self.max_health = PLAYER_CONFIG.get("max_health", 100)
         self.health = self.max_health
         
         # Combat Stats
-        self.damage_multiplier = 1.0
+        self.damage_multiplier = PLAYER_CONFIG.get("damage_multiplier", 1.0)
         self.attack_cooldown_multiplier = 1.0
-        self.projectile_count = 1
+        self.projectile_count = PLAYER_CONFIG.get("projectile_count", 1)
         self.last_attack_time = 0  # To manage attack speed later if needed, currently click-based
         
         # Progression
@@ -325,9 +361,9 @@ class Player(pygame.sprite.Sprite):
         self.exp_to_next_level = 50
         
         # Mana (Inspiration / 악상)
-        self.max_mana = 100.0
+        self.max_mana = PLAYER_CONFIG.get("max_mana", 100.0)
         self.mana = self.max_mana
-        self.mana_regen = 5.0 # per second
+        self.mana_regen = PLAYER_CONFIG.get("mana_regen", 5.0) # per second
         
         # Stance (Clefs)
         self.stance = "Treble" # Treble or Bass
@@ -498,31 +534,35 @@ class Projectile(pygame.sprite.Sprite):
                     self.rect = self.image.get_rect(center=(round(self.pos.x), round(self.pos.y)))
 
 class Enemy(pygame.sprite.Sprite):
-    def __init__(self, x, y, enemy_info, time_multiplier):
+    def __init__(self, x, y, enemy_info):
         super().__init__()
         self.level = enemy_info['level']
         
-        # Base scale 0.7 to ensure they are smaller than the player
-        # Let's say size increases slightly with level and time.
-        scale_factor = 0.7 + (self.level * 0.02) + (time_multiplier * 0.05)
-        orig_img = enemy_info['image']
-        new_w = int(orig_img.get_width() * scale_factor)
-        new_h = int(orig_img.get_height() * scale_factor)
+        # Pull stats from ENEMY_CONFIG, fallback to level '1' if not found
+        lvl_str = str(self.level)
+        conf = ENEMY_CONFIG.get(lvl_str, ENEMY_CONFIG.get("1", {"health": 30, "speed": 100, "damage": 5, "scale": 0.5}))
         
-        self.image = pygame.transform.smoothscale(orig_img, (new_w, new_h))
+        # Apply scaling visually right away
+        scale_mod = conf.get("scale", 0.5)
+        orig_img = enemy_info['image']
+        new_size = (int(orig_img.get_width() * scale_mod), int(orig_img.get_height() * scale_mod))
+        self.image = pygame.transform.smoothscale(orig_img, new_size)
+        
         self.rect = self.image.get_rect(center=(x, y))
         self.pos = pygame.math.Vector2(x, y)
         
-        # Lower level = faster but weaker. Higher level = slower but tankier.
-        base_speed = random.uniform(200, 250) - (self.level * 5)
-        self.speed = max(50, base_speed)
+        # Slightly smaller hitbox than the image
+        self.hitbox = self.rect.inflate(-20, -20)
         
-        # Stats scale with level and time
-        self.health = (20 + (self.level * 15)) * (1.0 + time_multiplier)
-        self.damage = (5 + (self.level * 3)) * (1.0 + time_multiplier * 0.5)
+        self.max_health = conf.get("health", 30.0)
+        self.health = self.max_health
+        self.speed = conf.get("speed", 100.0)
+        self.damage = conf.get("damage", 5.0)
         
-        # Adjust hitbox
-        self.hitbox = self.rect.inflate(-int(new_w * 0.3), -int(new_h * 0.3))
+        # Flash effect handling
+        self.is_flashing = False
+        self.flash_timer = 0
+        self.flash_duration = 0.1
 
     def update(self, dt, target_pos):
         direction = target_pos - self.pos
@@ -618,6 +658,11 @@ accent_next_note = False
 
 # --- Main Loop ---
 running = True
+game_time = 0.0
+current_stage = 1
+score = 0
+spawn_timer = 0
+spawn_rate = 1.0 # Base spawn rate
 while running:
     # Always tick clock to avoid spiral of death, but dt will be used based on state
     raw_dt = clock.tick(FPS) / 1000.0
@@ -625,8 +670,9 @@ while running:
     if current_state == STATE_PLAYING:
         dt = raw_dt
         game_time += dt
-        # Time multiplier increases by 0.1 every 10 seconds
-        time_multiplier = math.floor(game_time / 10.0) * 0.1
+        
+        # Stage calculation (every 60 seconds is a new stage)
+        current_stage = int(game_time // 60) + 1
         if spell_feedback_timer > 0:
             spell_feedback_timer -= dt
 
@@ -722,19 +768,38 @@ while running:
             ex = max(0, min(MAP_WIDTH, ex))
             ey = max(0, min(MAP_HEIGHT, ey))
             
-            # Select enemy type based on time. 
-            max_allowed_idx = min(len(enemy_data) - 1, int(game_time / 15))
-            if max_allowed_idx == 0:
-                chosen_enemy_info = enemy_data[0]
-            else:
-                chosen_enemy_info = random.choice(enemy_data[:max_allowed_idx + 1])
+            # --- Stage-based Probability Spawning ---
+            available_levels = sorted([info['level'] for info in enemy_data])
+            if not available_levels:
+                available_levels = [1]
+                
+            weights = []
+            max_level_allowed = min(len(available_levels), current_stage)
+            
+            for lvl in available_levels:
+                if lvl > current_stage:
+                    weights.append(0.0) # Cannot spawn enemies higher than current stage
+                elif lvl == current_stage:
+                    weights.append(20.0) # 20% chance for the newest, strongest enemy
+                else:
+                    # Distribute remaining 80% among lower levels, favoring slightly higher ones
+                    weight = 80.0 / max(1, (current_stage - 1))
+                    weights.append(weight)
+                    
+            if sum(weights) == 0:
+                weights[0] = 100.0
+                
+            chosen_level = random.choices(available_levels, weights=weights, k=1)[0]
+            
+            # Find the corresponding info dictionary
+            chosen_enemy_info = next((info for info in enemy_data if info['level'] == chosen_level), enemy_data[0])
 
-            enemy = Enemy(ex, ey, chosen_enemy_info, time_multiplier)
+            enemy = Enemy(ex, ey, chosen_enemy_info)
             all_sprites.add(enemy)
             enemies.add(enemy)
             
             # Difficulty ramp: Spawn rate caps at 0.1s
-            spawn_rate = max(0.1, spawn_rate - 0.002)
+            spawn_rate = max(0.1, 1.0 - (current_stage * 0.05))
 
         # Process the Score (악보) sequential execution
         if len(active_score) > 0:
@@ -856,7 +921,7 @@ while running:
                     else:
                         # Insufficient Mana aborts the rest of the score
                         spell_feedback_label = "실패 / 악상 부족!"
-                        spell_feedback_color = RED
+                        spell_feedback_color = (255, 0, 0)
                         spell_feedback_timer = 2.0
                         active_score.clear()
                         accent_next_note = False
@@ -1000,6 +1065,15 @@ while running:
         try:
             level_text = font.render(f"Lv: {player.level}", True, WHITE)
             screen.blit(level_text, (230, 15))
+            
+            stage_text = font.render(f"Stage: {current_stage}", True, (255, 200, 100))
+            screen.blit(stage_text, (230, 50))
+            
+            time_mins = int(game_time // 60)
+            time_secs = int(game_time % 60)
+            time_text = font.render(f"Time: {time_mins:02d}:{time_secs:02d}", True, WHITE)
+            screen.blit(time_text, (380, 50))
+            
             score_text = font.render(f"Score: {score}", True, WHITE)
             screen.blit(score_text, (20, 120))
             

@@ -8,3 +8,5 @@
 - Tool Calls: Added logic for Bass Clef and Treble Clef stance synergizing with Rest recovery amounts and Note attack damage multipliers in main.py.
 - Tool Calls: Completed overhaul of the Right-Click execution logic. Spells are now processed sequentially with a 0.5s delay. Global modifiers (Sharp, Flat) apply to the whole score, Accent only applies to the NEXT note and grants AoE size increases without costing extra mana.
 - Tool Calls: Completed Score Execution mechanism (Notes & Rests). Fixed Accent AoE. Added new Rest spells and recorded data. Preparing to commit and push changes to Git.
+- Tool Calls: The user requested to set the executable icon. Preparing to convert the provided .webp logo to .ico format and rerun PyInstaller.
+- Tool Calls: Applied JSON configurations (player/enemy), Stage-based enemy spawner, PyInstaller path fixes, generated custom executable icon from .webp, and built the Windows .exe.
