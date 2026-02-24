@@ -10,14 +10,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import json # Added import json
+import argparse
+
+parser = argparse.ArgumentParser(description="띳띠 서바이벌")
+parser.add_argument('--skip-title', action='store_true', help='Skip the title screen')
+args = parser.parse_args()
 
 # Initialize Pygame
 pygame.init()
+pygame.mixer.init()
 
-# Constants
-WIDTH, HEIGHT = 1600, 900
+# Constants & Settings
+RESOLUTIONS = [(1280, 720), (1600, 900), (1920, 1080)]
+current_resolution_idx = 1
+WIDTH, HEIGHT = RESOLUTIONS[current_resolution_idx]
 FPS = 60
 MAP_WIDTH, MAP_HEIGHT = 4000, 4000
+GRID_SIZE = 64
+is_fullscreen = False
+
+game_volume = 1.0
+LANGUAGES = ["한국어", "English", "日本語"]
+current_language_idx = 0
 
 # SPELL CLASSES
 SPELL_LABELS = [
@@ -169,6 +183,7 @@ except Exception as e:
 ASSETS_DIR = get_resource_path("assets")
 PLAYER_DIR = os.path.join(ASSETS_DIR, "플로로")
 ENEMY_DIR = os.path.join(ASSETS_DIR, "띳띠")
+MAP_DIR = os.path.join(ASSETS_DIR, "map")
 
 # --- Asset Loading ---
 def load_gif_frames(filepath, scale=1.0):
@@ -244,6 +259,27 @@ if not enemy_data:
     surf = pygame.Surface((50, 50))
     surf.fill(RED)
     enemy_data.append({'image': surf, 'level': 1})
+
+# Asset Loading: Map Editor Assets
+GRASS_DIR = os.path.join(MAP_DIR, "Grass")
+TREE_DIR = os.path.join(MAP_DIR, "tree")
+MAP_JSON = os.path.join(MAP_DIR, "map_data.json")
+
+grass_assets = {}
+if os.path.exists(GRASS_DIR):
+    for f in os.listdir(GRASS_DIR):
+        if f.endswith(".png"):
+            grass_assets[f] = load_image(os.path.join(GRASS_DIR, f))
+
+tree_assets = {}
+if os.path.exists(TREE_DIR):
+    for f in os.listdir(TREE_DIR):
+        if f.endswith(".png"):
+            tree_assets[f] = load_image(os.path.join(TREE_DIR, f))
+
+# Title Logo
+logo_img = load_image(get_resource_path("assets/dditi_survival_logo.webp"))
+
 
 # Load Projectile Animation Frames
 projectile_frames_flying = []
@@ -364,6 +400,11 @@ class Player(pygame.sprite.Sprite):
         self.max_mana = PLAYER_CONFIG.get("max_mana", 100.0)
         self.mana = self.max_mana
         self.mana_regen = PLAYER_CONFIG.get("mana_regen", 5.0) # per second
+        
+        # Foundry Systems (Coins, Relics, Scores)
+        self.coins = 0
+        self.relics = []          # List of relic string IDs
+        self.unlocked_scores = [] # List of special score data dicts
         
         # Stance (Clefs)
         self.stance = "Treble" # Treble or Bass
@@ -573,16 +614,107 @@ class Enemy(pygame.sprite.Sprite):
         self.rect.center = (round(self.pos.x), round(self.pos.y))
         self.hitbox.center = self.rect.center
 
+class Tree(pygame.sprite.Sprite):
+    def __init__(self, x, y, image):
+        super().__init__()
+        self.image = image
+        # Place the origin at the bottom-center of the tree essentially
+        self.rect = self.image.get_rect(midbottom=(x, y))
+        self.pos = pygame.math.Vector2(self.rect.centerx, self.rect.centery)
+        # Hitbox specifically at the base trunk of the tree (lower 1/3 quadrant)
+        self.hitbox = pygame.Rect(0, 0, self.rect.width * 0.4, self.rect.height * 0.3)
+        self.hitbox.midbottom = self.rect.midbottom
+
+class Coin(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        # Temporary visual for coin
+        self.image = pygame.Surface((15, 15), pygame.SRCALPHA)
+        pygame.draw.circle(self.image, (255, 215, 0), (7, 7), 7)
+        pygame.draw.circle(self.image, (200, 160, 0), (7, 7), 7, 2)
+        self.rect = self.image.get_rect(center=(x, y))
+        self.pos = pygame.math.Vector2(x, y)
+        self.hitbox = self.rect.inflate(10, 10) # slightly larger pickup radius
+
+class ShopNPC(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.image = pygame.Surface((40, 40))
+        self.image.fill((100, 200, 255))
+        # Draw a little "SHOP" text on it for now
+        font_mini = pygame.font.SysFont(None, 20)
+        txt = font_mini.render("NPC", True, (0, 0, 0))
+        self.image.blit(txt, (5, 10))
+        self.rect = self.image.get_rect(center=(x, y))
+        self.pos = pygame.math.Vector2(x, y)
+        self.hitbox = self.rect.inflate(20, 20)
+
 # --- Game State & Entities ---
 all_sprites = pygame.sprite.Group()
 enemies = pygame.sprite.Group()
 projectiles = pygame.sprite.Group()
+trees = pygame.sprite.Group()
+coins_group = pygame.sprite.Group()
+npc_group = pygame.sprite.Group()
 
 player = Player(MAP_WIDTH // 2, MAP_HEIGHT // 2)
 all_sprites.add(player)
 
 camera = Camera(MAP_WIDTH, MAP_HEIGHT)
 
+# Generate Map Background
+map_bg_surface = pygame.Surface((MAP_WIDTH, MAP_HEIGHT))
+map_bg_surface.fill(BG_COLOR)
+
+def load_map_data():
+    global map_bg_surface, trees
+    trees.empty()
+    map_bg_surface.fill(BG_COLOR)
+    
+    try:
+        if os.path.exists("assets/map/map_data.json"):
+            with open("assets/map/map_data.json", "r") as f:
+                map_data = json.load(f)
+                
+            # Draw grass
+            for coord_str, filename in map_data.get("grass", {}).items():
+                if filename in grass_assets:
+                    # coord_str is like "(12, 14)"
+                    gx, gy = eval(coord_str)
+                    px = gx * GRID_SIZE
+                    py = gy * GRID_SIZE
+                    map_bg_surface.blit(grass_assets[filename], (px, py))
+                    
+            # Instantiate trees
+            for coord_str, filename in map_data.get("tree", {}).items():
+                if filename in tree_assets:
+                    gx, gy = eval(coord_str)
+                    px = gx * GRID_SIZE
+                    py = gy * GRID_SIZE
+                    # Adjust tree pixel positions (adding half cell offset if desired, or mapping directly)
+                    t = Tree(px + GRID_SIZE//2, py + GRID_SIZE, tree_assets[filename])
+                    trees.add(t)
+                    all_sprites.add(t)
+    except Exception as e:
+        print(f"Failed to load map data: {e}")
+
+load_map_data() # Execute map load
+
+# --- Relic Hook System Architecture ---
+# This serves as the foundation for the 30+ custom relics/curses requested.
+def trigger_relic_event(event_name, **kwargs):
+    """
+    Called strategically throughout main.py (e.g., when an enemy dies, when coins are picked up, when an attack is fired).
+    """
+    for relic_id in player.relics:
+        # Example pseudo-registry check:
+        if relic_id == "doll_scribe" and event_name == "on_note_drawn":
+            pass # duplicate note logic
+        elif relic_id == "doll_lady" and event_name == "on_coin_pickup":
+            player.coins += kwargs.get("amount", 0)  # Double coins
+        elif relic_id == "tax_bill" and event_name == "on_stage_start":
+            player.coins = int(player.coins * 0.5) # Lose 50% coins
+            
 spawn_timer = 0
 spawn_rate = 1.0
 
@@ -600,10 +732,64 @@ score = 0
 game_time = 0.0 # Track elapsed time for scaling
 
 # Game States
+STATE_TITLE = -1
+STATE_SETTINGS = -2
 STATE_PLAYING = 0
 STATE_LEVEL_UP = 1
 STATE_GAME_OVER = 2
-current_state = STATE_PLAYING
+STATE_PAUSED = 3
+STATE_SHOP = 4
+current_state = STATE_PLAYING if args.skip_title else STATE_TITLE
+settings_return_state = STATE_TITLE
+
+# --- BGM Setup & Settings ---
+music_enabled = True
+show_guide = True
+prev_state = None
+bgm_title_path = get_resource_path("assets/sounds/title_screen_theme.mp3")
+bgm_ingame_path = get_resource_path("assets/sounds/ingame_theme_01.mp3")
+bgm_upgrade_path = get_resource_path("assets/sounds/upgrade_theme.mp3")
+
+try:
+    upgrade_theme_sound = pygame.mixer.Sound(bgm_upgrade_path)
+except Exception as e:
+    print(f"Warning: Could not load upgrade_theme.mp3 - {e}")
+    upgrade_theme_sound = None
+
+def apply_music_volume():
+    pygame.mixer.music.set_volume(game_volume if music_enabled else 0.0)
+    if upgrade_theme_sound:
+        upgrade_theme_sound.set_volume(game_volume if music_enabled else 0.0)
+
+def update_music_state(new_state, old_state):
+    apply_music_volume()
+    if new_state == STATE_TITLE:
+        try:
+            pygame.mixer.music.load(bgm_title_path)
+            pygame.mixer.music.play(-1)
+        except: pass
+    elif new_state == STATE_SETTINGS:
+        pass # Keep playing title music
+    elif new_state == STATE_PLAYING:
+        if old_state == STATE_LEVEL_UP:
+            if upgrade_theme_sound:
+                upgrade_theme_sound.stop()
+            pygame.mixer.music.unpause()
+        elif old_state != STATE_PLAYING:
+            try:
+                pygame.mixer.music.load(bgm_ingame_path)
+                pygame.mixer.music.play(-1)
+            except: pass
+    elif new_state == STATE_PAUSED:
+        pygame.mixer.music.pause()
+    elif new_state == STATE_LEVEL_UP:
+        pygame.mixer.music.pause()
+        if upgrade_theme_sound:
+            upgrade_theme_sound.play(-1)
+    elif new_state == STATE_GAME_OVER:
+        pygame.mixer.music.stop()
+        if upgrade_theme_sound:
+            upgrade_theme_sound.stop()
 
 # Upgrade Options
 upgrade_pool = [
@@ -656,6 +842,41 @@ global_dmg_mult = 1.0
 global_count_mult = 1
 accent_next_note = False
 
+def reset_game():
+    global player, camera, score, game_time, current_stage, spawn_timer, spawn_rate
+    global is_drawing, drawing_points, spell_feedback_timer, spell_feedback_label
+    global global_dmg_mult, global_count_mult, accent_next_note
+    
+    all_sprites.empty()
+    enemies.empty()
+    projectiles.empty()
+    trees.empty()
+    
+    player = Player(MAP_WIDTH // 2, MAP_HEIGHT // 2)
+    all_sprites.add(player)
+    
+    camera = Camera(MAP_WIDTH, MAP_HEIGHT)
+    
+    load_map_data() # Reload trees into sprite group
+    
+    score = 0
+    game_time = 0.0
+    current_stage = 1
+    spawn_timer = 0
+    spawn_rate = 1.0
+    
+    spellbook_queue.clear()
+    active_score.clear()
+    is_drawing = False
+    drawing_points.clear()
+    
+    spell_feedback_timer = 0.0
+    spell_feedback_label = ""
+    
+    global_dmg_mult = 1.0
+    global_count_mult = 1
+    accent_next_note = False
+
 # --- Main Loop ---
 running = True
 game_time = 0.0
@@ -664,15 +885,102 @@ score = 0
 spawn_timer = 0
 spawn_rate = 1.0 # Base spawn rate
 while running:
+    if current_state != prev_state:
+        update_music_state(current_state, prev_state)
+        prev_state = current_state
+
     # Always tick clock to avoid spiral of death, but dt will be used based on state
     raw_dt = clock.tick(FPS) / 1000.0
     
-    if current_state == STATE_PLAYING:
+    if current_state == STATE_TITLE:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    mouse_pos = pygame.mouse.get_pos()
+                    if pygame.Rect(WIDTH - 50, 20, 40, 40).collidepoint(mouse_pos):
+                        music_enabled = not music_enabled
+                        apply_music_volume()
+                        continue
+                    
+                    # Check button clicks (hardcoded rects based on draw logic below)
+                    start_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 50, 200, 50)
+                    settings_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 120, 200, 50)
+                    quit_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 190, 200, 50)
+                    
+                    if start_rect.collidepoint(mouse_pos):
+                        reset_game()
+                        current_state = STATE_PLAYING
+                    elif settings_rect.collidepoint(mouse_pos):
+                        settings_return_state = STATE_TITLE
+                        current_state = STATE_SETTINGS
+                    elif quit_rect.collidepoint(mouse_pos):
+                        running = False
+
+    elif current_state == STATE_SETTINGS:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    mouse_pos = pygame.mouse.get_pos()
+                    if pygame.Rect(WIDTH - 50, 20, 40, 40).collidepoint(mouse_pos):
+                        music_enabled = not music_enabled
+                        apply_music_volume()
+                        continue
+                    
+                    # Buttons
+                    res_prev = pygame.Rect(WIDTH//2 + 30, HEIGHT//2 - 150, 40, 40)
+                    res_next = pygame.Rect(WIDTH//2 + 230, HEIGHT//2 - 150, 40, 40)
+                    fullscreen_btn = pygame.Rect(WIDTH//2 + 50, HEIGHT//2 - 80, 200, 40)
+                    vol_down = pygame.Rect(WIDTH//2 + 30, HEIGHT//2 - 10, 40, 40)
+                    vol_up = pygame.Rect(WIDTH//2 + 230, HEIGHT//2 - 10, 40, 40)
+                    lang_prev = pygame.Rect(WIDTH//2 + 30, HEIGHT//2 + 60, 40, 40)
+                    lang_next = pygame.Rect(WIDTH//2 + 230, HEIGHT//2 + 60, 40, 40)
+                    back_btn = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 250, 200, 50)
+                    
+                    if res_prev.collidepoint(mouse_pos):
+                        current_resolution_idx = (current_resolution_idx - 1) % len(RESOLUTIONS)
+                        WIDTH, HEIGHT = RESOLUTIONS[current_resolution_idx]
+                        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN if is_fullscreen else 0)
+                    elif res_next.collidepoint(mouse_pos):
+                        current_resolution_idx = (current_resolution_idx + 1) % len(RESOLUTIONS)
+                        WIDTH, HEIGHT = RESOLUTIONS[current_resolution_idx]
+                        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN if is_fullscreen else 0)
+                    elif fullscreen_btn.collidepoint(mouse_pos):
+                        is_fullscreen = not is_fullscreen
+                        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN if is_fullscreen else 0)
+                    elif vol_down.collidepoint(mouse_pos):
+                        game_volume = max(0.0, game_volume - 0.1)
+                        apply_music_volume()
+                    elif vol_up.collidepoint(mouse_pos):
+                        game_volume = min(1.0, game_volume + 0.1)
+                        apply_music_volume()
+                    elif lang_prev.collidepoint(mouse_pos):
+                        current_language_idx = (current_language_idx - 1) % len(LANGUAGES)
+                    elif lang_next.collidepoint(mouse_pos):
+                        current_language_idx = (current_language_idx + 1) % len(LANGUAGES)
+                    elif back_btn.collidepoint(mouse_pos):
+                        current_state = settings_return_state
+
+    elif current_state == STATE_PLAYING:
         dt = raw_dt
         game_time += dt
         
         # Stage calculation (every 60 seconds is a new stage)
-        current_stage = int(game_time // 60) + 1
+        new_stage = int(game_time // 60) + 1
+        if new_stage > current_stage:
+            current_stage = new_stage
+            # Spawn Shop NPC at start of a new stage
+            spawn_radius = 500
+            angle = random.uniform(0, math.pi * 2)
+            nx = player.pos.x + math.cos(angle) * spawn_radius
+            ny = player.pos.y + math.sin(angle) * spawn_radius
+            npc = ShopNPC(nx, ny)
+            npc_group.add(npc)
+            all_sprites.add(npc)
+            
         if spell_feedback_timer > 0:
             spell_feedback_timer -= dt
 
@@ -681,7 +989,11 @@ while running:
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_LSHIFT:
+                if event.key == pygame.K_ESCAPE:
+                    current_state = STATE_PAUSED
+                elif event.key == pygame.K_TAB:
+                    show_guide = not show_guide
+                elif event.key == pygame.K_LSHIFT:
                     player.activate_skill()
                 elif event.key == pygame.K_SPACE:
                     valid_points = [p for p in drawing_points if p is not None]
@@ -714,6 +1026,10 @@ while running:
                     drawing_points.clear()
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1: # Left click - start drawing
+                    if pygame.Rect(WIDTH - 50, 20, 40, 40).collidepoint(event.pos):
+                        music_enabled = not music_enabled
+                        apply_music_volume()
+                        continue
                     is_drawing = True
                     # Do not clear if we are starting a new stroke for the same spell
                     drawing_points.append(event.pos)
@@ -722,6 +1038,29 @@ while running:
                         active_score = spellbook_queue.copy()
                         spellbook_queue.clear()
                         
+                        # Check Special Scores First
+                        raw_queue = [sp.split('_')[1] if '_' in sp else sp for sp in active_score]
+                        special_triggered = False
+                        
+                        # Placeholder mock data for Special Scores logic validation
+                        # e.g., "Sonata": ["QuarterNote", "QuarterNote", "EighthNote"]
+                        for spec_score in player.unlocked_scores:
+                            if raw_queue == spec_score["sequence"]:
+                                print(f"Special Score Triggered: {spec_score['name']}")
+                                spell_feedback_label = f"Special: {spec_score['name']}!"
+                                spell_feedback_color = (255, 215, 0)
+                                spell_feedback_timer = 2.0
+                                
+                                # Execute special score effect here...
+                                # For now, just clear active_score so normal notes don't trigger
+                                active_score.clear()
+                                special_triggered = True
+                                break
+                                
+                        if special_triggered:
+                            continue
+                        
+                        # Normal sequential execution
                         # Pre-calculate Globals (Sharps and Flats)
                         global_dmg_mult = 1.0
                         global_count_mult = 1
@@ -938,6 +1277,19 @@ while running:
                 player.health -= enemy.damage * dt
                 if player.health <= 0:
                     current_state = STATE_GAME_OVER
+                    
+        # Check player-tree collision
+        for tree in trees:
+            if player.hitbox.colliderect(tree.hitbox):
+                # Basic pushback
+                dx = player.rect.centerx - tree.rect.centerx
+                dy = player.rect.centery - tree.rect.centery
+                dist = max(0.1, math.hypot(dx, dy))
+                push_mag = 50 * dt
+                player.pos.x += (dx / dist) * push_mag
+                player.pos.y += (dy / dist) * push_mag
+                player.rect.center = (round(player.pos.x), round(player.pos.y))
+                player.hitbox.center = player.rect.center
 
         # Check projectile-enemy collection
         # Using lambda for hitbox collision. Do not kill projectile immediately.
@@ -949,8 +1301,13 @@ while running:
                     
                     # Process Splash AoE Damage if projectile has it
                     if getattr(p, 'is_aoe', False):
+                        # Scale radius based on the projectile's final calculated damage
+                        # Base radius 100, plus 1.5 pixels per point of damage
+                        aoe_radius = 100 + (p.damage * 1.5)
+                        aoe_radius_sq = aoe_radius ** 2
+                        
                         for other_enemy in enemies:
-                            if other_enemy != enemy and (other_enemy.pos - p.pos).length_squared() <= 150**2:
+                            if other_enemy != enemy and (other_enemy.pos - p.pos).length_squared() <= aoe_radius_sq:
                                 other_enemy.health -= p.damage
                                 
                     p.trigger_impact()
@@ -960,11 +1317,30 @@ while running:
             if enemy.health <= 0:
                 enemy.kill()
                 score += 10
+                
+                # 50% chance to drop a coin
+                if random.random() < 0.5:
+                    coin = Coin(enemy.pos.x, enemy.pos.y)
+                    coins_group.add(coin)
+                    all_sprites.add(coin)
+                    
                 exp_amount = 10 + (enemy.level * 5)
                 leveled_up = player.gain_exp(exp_amount)
                 if leveled_up:
                     current_state = STATE_LEVEL_UP
                     create_upgrade_overlay()
+
+        # Check Player-Coin collisions
+        for coin in list(coins_group):
+            if player.hitbox.colliderect(coin.hitbox):
+                coin.kill()
+                player.coins += 1
+                
+        # Check Player-NPC collision
+        for npc in list(npc_group):
+            if player.hitbox.colliderect(npc.hitbox):
+                # We hit the shop NPC!
+                current_state = STATE_SHOP
 
         # Update Camera
         camera.update(player)
@@ -976,6 +1352,10 @@ while running:
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     mouse_pos = pygame.mouse.get_pos()
+                    if pygame.Rect(WIDTH - 50, 20, 40, 40).collidepoint(mouse_pos):
+                        music_enabled = not music_enabled
+                        apply_music_volume()
+                        continue
                     for i, rect in enumerate(upgrade_rects):
                         if rect.collidepoint(mouse_pos):
                             chosen_upgrade = current_upgrades_offered[i]
@@ -983,17 +1363,94 @@ while running:
                             current_state = STATE_PLAYING
                             break
 
+    elif current_state == STATE_PAUSED:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    current_state = STATE_PLAYING
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    mouse_pos = pygame.mouse.get_pos()
+                    if pygame.Rect(WIDTH - 50, 20, 40, 40).collidepoint(mouse_pos):
+                        music_enabled = not music_enabled
+                        apply_music_volume()
+                        continue
+                        
+                    resume_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 - 60, 200, 50)
+                    restart_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 10, 200, 50)
+                    settings_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 80, 200, 50)
+                    quit_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 150, 200, 50)
+                    
+                    if resume_rect.collidepoint(mouse_pos):
+                        current_state = STATE_PLAYING
+                    elif restart_rect.collidepoint(mouse_pos):
+                        reset_game()
+                        current_state = STATE_PLAYING
+                    elif settings_rect.collidepoint(mouse_pos):
+                        settings_return_state = STATE_PAUSED
+                        current_state = STATE_SETTINGS
+                    elif quit_rect.collidepoint(mouse_pos):
+                        current_state = STATE_TITLE
+
     elif current_state == STATE_GAME_OVER:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    mouse_pos = pygame.mouse.get_pos()
+                    if pygame.Rect(WIDTH - 50, 20, 40, 40).collidepoint(mouse_pos):
+                        music_enabled = not music_enabled
+                        apply_music_volume()
+                        continue
+                        
+                    restart_rect = pygame.Rect(WIDTH//2 - 220, HEIGHT//2 + 80, 200, 50)
+                    quit_rect = pygame.Rect(WIDTH//2 + 20, HEIGHT//2 + 80, 200, 50)
+                    
+                    if restart_rect.collidepoint(mouse_pos):
+                        reset_game()
+                        current_state = STATE_PLAYING
+                    elif quit_rect.collidepoint(mouse_pos):
+                        current_state = STATE_TITLE
+                        
+    elif current_state == STATE_SHOP:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    # Move player back slightly from NPC so they don't instatrigger again
+                    player.pos.y += 50
+                    player.rect.center = (round(player.pos.x), round(player.pos.y))
+                    player.hitbox.center = player.rect.center
+                    current_state = STATE_PLAYING
 
     # Draw Background
-    screen.fill(BG_COLOR)
+    bg_x = camera.camera.x
+    bg_y = camera.camera.y
+    screen.blit(map_bg_surface, (bg_x, bg_y))
     
     # Draw Sprites (Sorted by Y coordinates to give false depth)
     for sprite in sorted(all_sprites, key=lambda s: s.rect.bottom):
-        screen.blit(sprite.image, camera.apply(sprite))
+        screen_rect = camera.apply(sprite)
+        # Optimization: Only draw if the sprite's screen_rect overlaps the screen boundaries
+        if screen_rect.right > 0 and screen_rect.left < WIDTH and screen_rect.bottom > 0 and screen_rect.top < HEIGHT:
+            screen.blit(sprite.image, screen_rect)
+            
+            # Enemy Health Bar
+            if isinstance(sprite, Enemy):
+                health_ratio = max(0, sprite.health / getattr(sprite, 'max_health', 30.0))
+                bar_width = 40
+                bar_height = 5
+                bar_x = screen_rect.centerx - (bar_width // 2)
+                bar_y = screen_rect.top - 10
+                
+                # Draw border, red background, green foreground
+                pygame.draw.rect(screen, (30, 30, 30), (bar_x - 1, bar_y - 1, bar_width + 2, bar_height + 2))
+                pygame.draw.rect(screen, (200, 0, 0), (bar_x, bar_y, bar_width, bar_height))
+                pygame.draw.rect(screen, (0, 200, 0), (bar_x, bar_y, bar_width * health_ratio, bar_height))
 
     # Draw the current drawing line
     if len(drawing_points) > 1:
@@ -1014,12 +1471,15 @@ while running:
         pygame.draw.rect(screen, (50, 50, 50), (20, 60, 200, 10))
         exp_ratio = max(0, player.exp / player.exp_to_next_level)
         pygame.draw.rect(screen, (0, 150, 255), (20, 60, 200 * exp_ratio, 10))
-        
         # Mana (악상) bar
         pygame.draw.rect(screen, BLACK, (18, 88, 204, 14))
         pygame.draw.rect(screen, (50, 50, 50), (20, 90, 200, 10))
         mana_ratio = max(0, player.mana / player.max_mana)
         pygame.draw.rect(screen, (150, 0, 255), (20, 90, 200 * mana_ratio, 10))
+        
+        # Coins UI
+        coin_text = font.render(f"Coins: {player.coins}", True, (255, 215, 0))
+        screen.blit(coin_text, (20, 150))
         
         # Spellboard UI (Queue or Active Score)
         queue_start_x = WIDTH - 290
@@ -1078,31 +1538,32 @@ while running:
             screen.blit(score_text, (20, 120))
             
             # --- Draw Spell Guide ---
-            guide_y = 160
-            guide_x = 20
-            guide_title = font.render("- 악상 기호 가이드 -", True, (200, 200, 200))
-            screen.blit(guide_title, (guide_x, guide_y))
-            guide_y += 35
-            
-            guide_items = [
-                ("0_TrebleClef", "높은음: 공격 모드 (기본)"),
-                ("1_BassClef", "낮은음: 서포트 모드 (회복↑, 딜↓)"),
-                ("2_Sharp", "샵(#): [전체] 데미지 1.7배"),
-                ("3_Flat", "플랫(b): [전체] 탄 개수 2배"),
-                ("5_Accent", "악센트(>): [다음 공격] 확산(AoE) 및 크기 증가"),
-                ("4_QuarterNote", "4분음표: 강한 공격 1발 (악상 30)"),
-                ("6_EighthNote", "8분음표: 약한 공격 2발 (악상 15)"),
-                ("7_QuarterRest", "4분쉼표: 악상 회복 (기본30 / 서포트50)"),
-                ("8_HalfRest", "2분쉼표: 체력 회복 (기본20 / 서포트40)")
-            ]
-            
-            for g_label, g_desc in guide_items:
-                if g_label in spell_icons_queue:
-                    icon = spell_icons_queue[g_label]
-                    screen.blit(icon, (guide_x, guide_y - 5))
-                desc_surf = ui_font.render(g_desc, True, WHITE)
-                screen.blit(desc_surf, (guide_x + 40, guide_y))
-                guide_y += 40
+            if show_guide:
+                guide_y = 190
+                guide_x = 20
+                guide_title = font.render("- 악상 기호 가이드 (TAB으로 숨기기) -", True, (200, 200, 200))
+                screen.blit(guide_title, (guide_x, guide_y))
+                guide_y += 35
+                
+                guide_items = [
+                    ("0_TrebleClef", "높은음: 공격 모드 (기본)"),
+                    ("1_BassClef", "낮은음: 서포트 모드 (회복↑, 딜↓)"),
+                    ("2_Sharp", "샵(#): [전체] 데미지 1.7배"),
+                    ("3_Flat", "플랫(b): [전체] 탄 개수 2배"),
+                    ("5_Accent", "악센트(>): [다음 공격] 확산(AoE) 및 크기 증가"),
+                    ("4_QuarterNote", "4분음표: 강한 공격 1발 (악상 30)"),
+                    ("6_EighthNote", "8분음표: 약한 공격 2발 (악상 15)"),
+                    ("7_QuarterRest", "4분쉼표: 악상 회복 (기본30 / 서포트50)"),
+                    ("8_HalfRest", "2분쉼표: 체력 회복 (기본20 / 서포트40)")
+                ]
+                
+                for g_label, g_desc in guide_items:
+                    if g_label in spell_icons_queue:
+                        icon = spell_icons_queue[g_label]
+                        screen.blit(icon, (guide_x, guide_y - 5))
+                    desc_surf = ui_font.render(g_desc, True, WHITE)
+                    screen.blit(desc_surf, (guide_x + 40, guide_y))
+                    guide_y += 40
             # -------------------------
             
             info_text = font.render("좌클릭 길게: 그리기 | 스페이스: 저장 | 우클릭: 사용 | LSHIFT: 스킬", True, WHITE)
@@ -1136,6 +1597,85 @@ while running:
 
         except:
             pass # Handle potential font issues silently
+
+    if current_state == STATE_TITLE:
+        screen.fill((20, 20, 30))
+        
+        # Draw Logo
+        if logo_img:
+            logo_rect = logo_img.get_rect(center=(WIDTH//2, HEIGHT//2 - 150))
+            screen.blit(logo_img, logo_rect)
+            
+        # Draw Buttons
+        buttons = [("게임 시작", HEIGHT//2 + 50), ("설정", HEIGHT//2 + 120), ("종료", HEIGHT//2 + 190)]
+        mouse_pos = pygame.mouse.get_pos()
+        for label, y in buttons:
+            rect = pygame.Rect(WIDTH//2 - 100, y, 200, 50)
+            color = (80, 80, 100) if rect.collidepoint(mouse_pos) else (50, 50, 70)
+            pygame.draw.rect(screen, color, rect, border_radius=10)
+            pygame.draw.rect(screen, WHITE, rect, 2, border_radius=10)
+            
+            text_surf = font.render(label, True, WHITE)
+            screen.blit(text_surf, (rect.centerx - text_surf.get_width()//2, rect.centery - text_surf.get_height()//2))
+
+    elif current_state == STATE_SETTINGS:
+        screen.fill((30, 30, 40))
+        title_surf = title_font.render("설정 (Settings)", True, WHITE)
+        screen.blit(title_surf, (WIDTH//2 - title_surf.get_width()//2, 80))
+        
+        options = [
+            ("해상도", HEIGHT//2 - 150),
+            ("창 모드", HEIGHT//2 - 80),
+            ("게임 볼륨", HEIGHT//2 - 10),
+            ("언어", HEIGHT//2 + 60),
+            ("조작키", HEIGHT//2 + 130)
+        ]
+        
+        for label, y in options:
+            label_surf = font.render(label, True, (200, 200, 200))
+            screen.blit(label_surf, (WIDTH//2 - 250, y))
+            
+        mouse_pos = pygame.mouse.get_pos()
+            
+        # Helper to draw interactive value
+        def draw_val(y, val_text, has_arrows=True):
+            if has_arrows:
+                prev_rect = pygame.Rect(WIDTH//2 + 30, y, 40, 40)
+                next_rect = pygame.Rect(WIDTH//2 + 230, y, 40, 40)
+                
+                pygame.draw.rect(screen, (80,80,100) if prev_rect.collidepoint(mouse_pos) else (50,50,70), prev_rect, border_radius=5)
+                pygame.draw.rect(screen, (80,80,100) if next_rect.collidepoint(mouse_pos) else (50,50,70), next_rect, border_radius=5)
+                
+                lt = font.render("<", True, WHITE)
+                rt = font.render(">", True, WHITE)
+                screen.blit(lt, (prev_rect.centerx - lt.get_width()//2, prev_rect.centery - lt.get_height()//2))
+                screen.blit(rt, (next_rect.centerx - rt.get_width()//2, next_rect.centery - rt.get_height()//2))
+                
+                vt = font.render(val_text, True, (255, 255, 100))
+                screen.blit(vt, (WIDTH//2 + 150 - vt.get_width()//2, y))
+            else:
+                rect = pygame.Rect(WIDTH//2 + 50, y, 200, 40)
+                pygame.draw.rect(screen, (80,80,100) if rect.collidepoint(mouse_pos) else (50,50,70), rect, border_radius=5)
+                vt = font.render(val_text, True, (255, 255, 100))
+                screen.blit(vt, (rect.centerx - vt.get_width()//2, rect.centery - vt.get_height()//2))
+                
+        # Draw dynamic values
+        draw_val(HEIGHT//2 - 150, f"{WIDTH}x{HEIGHT}")
+        draw_val(HEIGHT//2 - 80, "전체화면" if is_fullscreen else "창 모드", has_arrows=False)
+        draw_val(HEIGHT//2 - 10, f"{int(game_volume * 100)}%")
+        draw_val(HEIGHT//2 + 60, LANGUAGES[current_language_idx])
+        
+        # Keybinds (static display preview)
+        kb_text = ui_font.render("W/A/S/D: 이동 | 스페이스: 저장 | 좌클릭: 그리기", True, (150, 150, 150))
+        screen.blit(kb_text, (WIDTH//2 + 30, HEIGHT//2 + 135))
+        
+        # Back Button
+        back_rect = pygame.Rect(WIDTH//2 - 100, HEIGHT//2 + 250, 200, 50)
+        color = (80, 80, 100) if back_rect.collidepoint(mouse_pos) else (50, 50, 70)
+        pygame.draw.rect(screen, color, back_rect, border_radius=10)
+        back_surf = font.render("돌아가기", True, WHITE)
+        screen.blit(back_surf, (back_rect.centerx - back_surf.get_width()//2, back_rect.centery - back_surf.get_height()//2))
+
 
     # Level Up Overlay
     if current_state == STATE_LEVEL_UP:
@@ -1177,6 +1717,54 @@ while running:
         
         final_score_text = font.render(f"최종 점수: {score}", True, (255, 215, 0))
         screen.blit(final_score_text, (WIDTH//2 - final_score_text.get_width()//2, HEIGHT//2))
+        
+        mouse_pos = pygame.mouse.get_pos()
+        buttons = [("재시작", WIDTH//2 - 220), ("타이틀로", WIDTH//2 + 20)]
+        for label, x in buttons:
+            rect = pygame.Rect(x, HEIGHT//2 + 80, 200, 50)
+            color = (80, 80, 100) if rect.collidepoint(mouse_pos) else (50, 50, 70)
+            pygame.draw.rect(screen, color, rect, border_radius=10)
+            pygame.draw.rect(screen, WHITE, rect, 2, border_radius=10)
+            text_surf = font.render(label, True, WHITE)
+            screen.blit(text_surf, (rect.centerx - text_surf.get_width()//2, rect.centery - text_surf.get_height()//2))
+
+    # Pause Overlay
+    elif current_state == STATE_PAUSED:
+        # Darken screen
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        screen.blit(overlay, (0, 0))
+        
+        title_text = title_font.render("일시 정지", True, WHITE)
+        screen.blit(title_text, (WIDTH//2 - title_text.get_width()//2, HEIGHT//2 - 180))
+        
+        mouse_pos = pygame.mouse.get_pos()
+        buttons = [("계속하기", HEIGHT//2 - 60), ("재시작", HEIGHT//2 + 10), ("설정", HEIGHT//2 + 80), ("타이틀로", HEIGHT//2 + 150)]
+        
+        for label, y in buttons:
+            rect = pygame.Rect(WIDTH//2 - 100, y, 200, 50)
+            color = (80, 80, 100) if rect.collidepoint(mouse_pos) else (50, 50, 70)
+            pygame.draw.rect(screen, color, rect, border_radius=10)
+            pygame.draw.rect(screen, WHITE, rect, 2, border_radius=10)
+            text_surf = font.render(label, True, WHITE)
+            screen.blit(text_surf, (rect.centerx - text_surf.get_width()//2, rect.centery - text_surf.get_height()//2))
+
+        # Placeholder for items
+        item_box_rect = pygame.Rect(WIDTH//2 + 150, HEIGHT//2 - 60, 300, 250)
+        pygame.draw.rect(screen, (40, 40, 50, 230), item_box_rect, border_radius=10)
+        pygame.draw.rect(screen, (100, 100, 150), item_box_rect, 2, border_radius=10)
+        
+        item_title = ui_font.render("획득한 아이템 목록 (준비 중)", True, (200, 200, 200))
+        screen.blit(item_title, (item_box_rect.centerx - item_title.get_width()//2, item_box_rect.top + 20))
+
+    # Draw Global Music Toggle Button
+    toggle_rect = pygame.Rect(WIDTH - 50, 20, 40, 40)
+    pygame.draw.rect(screen, (50, 50, 50), toggle_rect, border_radius=5)
+    pygame.draw.rect(screen, WHITE, toggle_rect, 2, border_radius=5)
+    
+    # Simple icon: On (Green) / Off (Red)
+    color = GREEN if music_enabled else RED
+    pygame.draw.circle(screen, color, toggle_rect.center, 10)
 
     pygame.display.flip()
 

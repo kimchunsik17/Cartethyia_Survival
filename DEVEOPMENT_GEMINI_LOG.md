@@ -10,3 +10,4 @@
 - Tool Calls: Completed Score Execution mechanism (Notes & Rests). Fixed Accent AoE. Added new Rest spells and recorded data. Preparing to commit and push changes to Git.
 - Tool Calls: The user requested to set the executable icon. Preparing to convert the provided .webp logo to .ico format and rerun PyInstaller.
 - Tool Calls: Applied JSON configurations (player/enemy), Stage-based enemy spawner, PyInstaller path fixes, generated custom executable icon from .webp, and built the Windows .exe.
+- Tool Calls: Reinstalled pygame, numpy, torch, torchvision, Pillow via pip install due to python version change.
